@@ -6,7 +6,8 @@ from typing import List, Optional
 from datetime import datetime
 import os
 from dotenv import load_dotenv
-from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
+from openai import OpenAI
+import base64
 import json
 import re
 import aiosmtplib
@@ -101,24 +102,31 @@ async def health():
 @app.post("/api/analyze-chart")
 async def analyze_chart(request: AnalyzeRequest):
     try:
-        # Get API key
+       # Get API key
         api_key = os.getenv("EMERGENT_LLM_KEY")
         if not api_key:
             raise HTTPException(status_code=500, detail="API key no configurada")
         
-        # Create chat instance with OpenAI Vision
-        chat = LlmChat(
-            api_key=api_key,
-            session_id=f"chart_analysis_{datetime.now().timestamp()}",
-            system_message="Eres un asistente experto en análisis de gráficas. Extrae datos de gráficas de columnas con precisión."
-        ).with_model("openai", "gpt-4o")
+        # Create OpenAI client
+        client = OpenAI(api_key=api_key)
         
-        # Create image content
-        image_content = ImageContent(image_base64=request.image_base64)
+        # Prepare image for OpenAI
+        image_url = f"data:image/jpeg;base64,{request.image_base64}"
         
-        # Create message with specific instructions
-        user_message = UserMessage(
-            text="""Analiza esta gráfica de barras/columnas.
+        # Call OpenAI Vision API
+        response_obj = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Eres un asistente experto en análisis de gráficas. Extrae datos de gráficas de columnas con precisión."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": """Analiza esta gráfica de barras/columnas.
 
 Extrae la siguiente información en formato JSON:
 1. Las 13 ETIQUETAS que aparecen en la PARTE INFERIOR de cada columna (eje X)
@@ -138,12 +146,22 @@ Responde SOLO con este formato JSON:
   "valores": [1680, 1930, 1608, ...]
 }
 
-Ejemplo: Si ves "1,680" en la columna, debes devolver 1680 (número completo de 4 dígitos).""",
-            file_contents=[image_content]
+Ejemplo: Si ves "1,680" en la columna, debes devolver 1680 (número completo de 4 dígitos)."""
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=1000
         )
         
-        # Send message and get response
-        response = await chat.send_message(user_message)
+        # Get response text
+        response = response_obj.choices[0].message.content
         
         # Parse response
         try:
