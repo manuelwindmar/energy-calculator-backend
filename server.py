@@ -6,7 +6,7 @@ from typing import List, Optional
 from datetime import datetime
 import os
 from dotenv import load_dotenv
-from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
+# emergentintegrations no disponible en Render - usar OpenAI directo
 import json
 import re
 import aiosmtplib
@@ -106,90 +106,69 @@ async def analyze_chart(request: AnalyzeRequest):
         if not api_key:
             raise HTTPException(status_code=500, detail="API key no configurada")
         
-        # Try using emergentintegrations first (local development)
-        try:
-            from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent as EmergentImageContent
-            
-            chat = LlmChat(
-                api_key=api_key,
-                session_id=f"chart_analysis_{datetime.now().timestamp()}",
-                system_message="Eres un asistente experto en análisis de gráficas. Extrae datos de gráficas de columnas con precisión."
-            ).with_model("openai", "gpt-4o")
-            
-            image_content = EmergentImageContent(image_base64=request.image_base64)
-            
-            user_message = UserMessage(
-                text="""Analiza esta gráfica de barras/columnas.
+        # Use OpenAI API directly
+        import httpx
+        
+        async with httpx.AsyncClient() as client:
+            response_api = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "gpt-4o",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "Eres un asistente experto en análisis de gráficas. Extrae datos de gráficas de columnas con precisión."
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": """Analiza esta gráfica de barras/columnas.
 
-Extrae EXACTAMENTE los 13 valores numéricos que aparecen en la PARTE SUPERIOR de cada columna.
+Extrae la siguiente información en formato JSON:
+1. Las 13 ETIQUETAS que aparecen en la PARTE INFERIOR de cada columna (eje X)
+2. Los 13 VALORES NUMÉRICOS EXACTOS que aparecen en la PARTE SUPERIOR de cada columna
 
-IMPORTANTE:
-- Extrae SOLO los números que están en la parte superior de las columnas
-- Debe haber exactamente 13 valores
-- Los números pueden tener comas como separador de miles (ejemplo: 1,680)
-- Devuelve SOLO un array JSON con los números en orden de izquierda a derecha
-- Ejemplo de formato esperado: [1680, 1930, 1608, 1547, 1331, 1450, 1251, 1357, 1861, 2041, 1906, 2141, 2002]
+CRÍTICO - VALORES EXACTOS:
+- Debe haber exactamente 13 etiquetas y 13 valores
+- Los valores deben ser EXACTAMENTE como aparecen en la imagen
+- NO redondees ni modifiques los valores
+- Si un valor tiene 4 dígitos (ejemplo: 1680, 1930), debes extraerlo COMPLETO
+- Si tiene coma como separador de miles (1,680), elimina la coma y devuelve el número completo (1680)
+- Mantén el orden de izquierda a derecha
 
-Responde SOLO con el array JSON, sin texto adicional.""",
-                file_contents=[image_content]
+Responde SOLO con este formato JSON:
+{
+  "etiquetas": ["etiqueta1", "etiqueta2", ...],
+  "valores": [1680, 1930, 1608, ...]
+}
+
+Ejemplo: Si ves "1,680" en la columna, debes devolver 1680 (número completo de 4 dígitos)."""
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{request.image_base64}"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "max_tokens": 1000
+                },
+                timeout=30.0
             )
             
-            response = await chat.send_message(user_message)
-        except ImportError:
-            # Fallback to direct OpenAI API (for Render deployment)
-            import httpx
+            if response_api.status_code != 200:
+                raise HTTPException(status_code=response_api.status_code, detail=f"OpenAI API error: {response_api.text}")
             
-            async with httpx.AsyncClient() as client:
-                response_api = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": "gpt-4o",
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": "Eres un asistente experto en análisis de gráficas. Extrae datos de gráficas de columnas con precisión."
-                            },
-                            {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": """Analiza esta gráfica de barras/columnas.
-
-Extrae EXACTAMENTE los 13 valores numéricos que aparecen en la PARTE SUPERIOR de cada columna.
-
-IMPORTANTE:
-- Extrae SOLO los números que están en la parte superior de las columnas
-- Debe haber exactamente 13 valores
-- Los números pueden tener comas como separador de miles (ejemplo: 1,680)
-- Devuelve SOLO un array JSON con los números en orden de izquierda a derecha
-- Ejemplo de formato esperado: [1680, 1930, 1608, 1547, 1331, 1450, 1251, 1357, 1861, 2041, 1906, 2141, 2002]
-
-Responde SOLO con el array JSON, sin texto adicional."""
-                                    },
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:image/jpeg;base64,{request.image_base64}"
-                                        }
-                                    }
-                                ]
-                            }
-                        ],
-                        "max_tokens": 500
-                    },
-                    timeout=30.0
-                )
-                
-                if response_api.status_code != 200:
-                    raise HTTPException(status_code=response_api.status_code, detail=f"OpenAI API error: {response_api.text}")
-                
-                response_data = response_api.json()
-                response = response_data["choices"][0]["message"]["content"]
+            response_data = response_api.json()
+            response = response_data["choices"][0]["message"]["content"]
         
         # Parse response
         try:
