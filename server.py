@@ -6,7 +6,7 @@ from typing import List, Optional
 from datetime import datetime
 import os
 from dotenv import load_dotenv
-from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
+import httpx
 import json
 import re
 import aiosmtplib
@@ -106,19 +106,8 @@ async def analyze_chart(request: AnalyzeRequest):
         if not api_key:
             raise HTTPException(status_code=500, detail="API key no configurada")
         
-        # Create chat instance with OpenAI Vision
-        chat = LlmChat(
-            api_key=api_key,
-            session_id=f"chart_analysis_{datetime.now().timestamp()}",
-            system_message="Eres un asistente experto en análisis de gráficas. Extrae datos de gráficas de columnas con precisión."
-        ).with_model("openai", "gpt-4o")
-        
-        # Create image content
-        image_content = ImageContent(image_base64=request.image_base64)
-        
-        # Create message with specific instructions
-        user_message = UserMessage(
-            text="""Analiza esta gráfica de barras/columnas.
+        # Prepare the message for OpenAI Vision API
+        prompt = """Analiza esta gráfica de barras/columnas.
 
 Extrae la siguiente información en formato JSON:
 1. Las 13 ETIQUETAS que aparecen en la PARTE INFERIOR de cada columna (eje X)
@@ -138,17 +127,57 @@ Responde SOLO con este formato JSON:
   "valores": [1680, 1930, 1608, ...]
 }
 
-Ejemplo: Si ves "1,680" en la columna, debes devolver 1680 (número completo de 4 dígitos).""",
-            file_contents=[image_content]
-        )
+Ejemplo: Si ves "1,680" en la columna, debes devolver 1680 (número completo de 4 dígitos)."""
         
-        # Send message and get response
-        response = await chat.send_message(user_message)
+        # Prepare the request payload for OpenAI API
+        payload = {
+            "model": "gpt-4o",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Eres un asistente experto en análisis de gráficas. Extrae datos de gráficas de columnas con precisión."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{request.image_base64}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            "max_tokens": 1000
+        }
+        
+        # Make the API call to OpenAI
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                },
+                json=payload,
+                timeout=30.0
+            )
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=500, detail=f"OpenAI API error: {response.status_code}")
+            
+            result = response.json()
+            response_text = result["choices"][0]["message"]["content"]
         
         # Parse response
         try:
             # Try to extract JSON from response
-            json_match = re.search(r'\{[^}]+\}', response, re.DOTALL)
+            json_match = re.search(r'\{[^}]+\}', response_text, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group(0))
                 etiquetas = data.get("etiquetas", [])
@@ -157,7 +186,7 @@ Ejemplo: Si ves "1,680" en la columna, debes devolver 1680 (número completo de 
                 raise ValueError("No JSON found")
         except:
             # Fallback: extract numbers and assume default labels
-            numbers = re.findall(r'\d+[,\d]*', response)
+            numbers = re.findall(r'\d+[,\d]*', response_text)
             valores = [float(n.replace(',', '')) for n in numbers[:13]]
             etiquetas = [f"Col {i+1}" for i in range(13)]
         
@@ -177,7 +206,7 @@ Ejemplo: Si ves "1,680" en la columna, debes devolver 1680 (número completo de 
             "etiquetas": etiquetas,
             "valores": valores,
             "suma_total": suma_total,
-            "raw_response": response
+            "raw_response": response_text
         }
         
     except Exception as e:
