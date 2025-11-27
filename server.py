@@ -6,7 +6,7 @@ from typing import List, Optional
 from datetime import datetime
 import os
 from dotenv import load_dotenv
-# emergentintegrations no disponible en Render - usar OpenAI directo
+from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
 import json
 import re
 import aiosmtplib
@@ -102,33 +102,23 @@ async def health():
 async def analyze_chart(request: AnalyzeRequest):
     try:
         # Get API key
-        api_key = os.getenv("EMERGENT_LLM_KEY")
+        api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise HTTPException(status_code=500, detail="API key no configurada")
         
-        # Use OpenAI API directly
-        import httpx
+        # Create chat instance with OpenAI Vision
+        chat = LlmChat(
+            api_key=api_key,
+            session_id=f"chart_analysis_{datetime.now().timestamp()}",
+            system_message="Eres un asistente experto en análisis de gráficas. Extrae datos de gráficas de columnas con precisión."
+        ).with_model("openai", "gpt-4o")
         
-        async with httpx.AsyncClient() as client:
-            response_api = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": "gpt-4o",
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "Eres un asistente experto en análisis de gráficas. Extrae datos de gráficas de columnas con precisión."
-                        },
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": """Analiza esta gráfica de barras/columnas.
+        # Create image content
+        image_content = ImageContent(image_base64=request.image_base64)
+        
+        # Create message with specific instructions
+        user_message = UserMessage(
+            text="""Analiza esta gráfica de barras/columnas.
 
 Extrae la siguiente información en formato JSON:
 1. Las 13 ETIQUETAS que aparecen en la PARTE INFERIOR de cada columna (eje X)
@@ -148,27 +138,12 @@ Responde SOLO con este formato JSON:
   "valores": [1680, 1930, 1608, ...]
 }
 
-Ejemplo: Si ves "1,680" en la columna, debes devolver 1680 (número completo de 4 dígitos)."""
-                                },
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/jpeg;base64,{request.image_base64}"
-                                    }
-                                }
-                            ]
-                        }
-                    ],
-                    "max_tokens": 1000
-                },
-                timeout=30.0
-            )
-            
-            if response_api.status_code != 200:
-                raise HTTPException(status_code=response_api.status_code, detail=f"OpenAI API error: {response_api.text}")
-            
-            response_data = response_api.json()
-            response = response_data["choices"][0]["message"]["content"]
+Ejemplo: Si ves "1,680" en la columna, debes devolver 1680 (número completo de 4 dígitos).""",
+            file_contents=[image_content]
+        )
+        
+        # Send message and get response
+        response = await chat.send_message(user_message)
         
         # Parse response
         try:
